@@ -1,0 +1,235 @@
+import { AmmError, InsufficientLiquidityError, ExcessiveSlippageError, DeadlineExpiredError, ZeroAmountError, PoolNotFoundError, InvariantViolationError } from "./errors.js";
+import { EngineStateStore } from "./state.js";
+const BPS_DIVISOR = 10000n;
+const MINIMUM_LIQUIDITY = 1000n;
+const MIN_FEE_BPS = 1;
+const MAX_FEE_BPS = 1000;
+export function sqrtBigInt(n) {
+    if (n < 0n)
+        throw new Error("Negative square root");
+    if (n < 2n)
+        return n;
+    let x0 = n / 2n;
+    let x1 = (x0 + n / x0) / 2n;
+    while (x1 < x0) {
+        x0 = x1;
+        x1 = (x0 + n / x0) / 2n;
+    }
+    return x0;
+}
+export class AmmEngine {
+    store;
+    constructor(store) {
+        this.store = store || new EngineStateStore();
+    }
+    createPool(tokenA, tokenB, initialAmountA, initialAmountB, creator, feeBps = 30) {
+        if (!tokenA || !tokenB || typeof tokenA !== "string" || typeof tokenB !== "string") {
+            throw new AmmError("AMM_INVALID_TOKEN", "Tokens must be non-empty strings");
+        }
+        if (tokenA.trim().toLowerCase() === tokenB.trim().toLowerCase()) {
+            throw new AmmError("AMM_IDENTICAL_ADDRESSES", "Cannot create pool with identical token identifiers");
+        }
+        if (!Number.isInteger(feeBps) || feeBps < MIN_FEE_BPS || feeBps > MAX_FEE_BPS) {
+            throw new AmmError("AMM_INVALID_FEE_BPS", `feeBps must be an integer between ${MIN_FEE_BPS} and ${MAX_FEE_BPS}`);
+        }
+        if (initialAmountA <= 0n || initialAmountB <= 0n) {
+            throw new ZeroAmountError("initialAmount");
+        }
+        const isTokenAFirst = tokenA.toLowerCase() < tokenB.toLowerCase();
+        const [normTokenA, normTokenB] = isTokenAFirst ? [tokenA, tokenB] : [tokenB, tokenA];
+        const [normReserveA, normReserveB] = isTokenAFirst ? [initialAmountA, initialAmountB] : [initialAmountB, initialAmountA];
+        const poolId = this.store.getPoolId(normTokenA, normTokenB, feeBps);
+        if (this.store.hasPool(poolId)) {
+            throw new AmmError("AMM_POOL_ALREADY_EXISTS", `Pool ${poolId} already exists`);
+        }
+        const root = sqrtBigInt(normReserveA * normReserveB);
+        if (root <= MINIMUM_LIQUIDITY) {
+            throw new InsufficientLiquidityError("Initial liquidity too low to lock minimum shares");
+        }
+        const userLp = root - MINIMUM_LIQUIDITY;
+        const pool = {
+            id: poolId,
+            tokenA: normTokenA,
+            tokenB: normTokenB,
+            feeBps,
+            reserveA: normReserveA.toString(),
+            reserveB: normReserveB.toString(),
+            totalLpSupply: root.toString(),
+            lpBalances: {
+                "0x0000000000000000000000000000000000000000": MINIMUM_LIQUIDITY.toString(),
+                [creator.toLowerCase()]: userLp.toString()
+            },
+            createdAt: Date.now(),
+            lastUpdatedAt: Date.now(),
+            tradeCount: 0
+        };
+        this.store.savePool(pool);
+        this.store.logAudit("CREATE_POOL", poolId, { creator, initialAmountA: initialAmountA.toString(), initialAmountB: initialAmountB.toString() });
+        return { poolId, lpTokensMinted: userLp };
+    }
+    swap(poolId, tokenIn, amountIn, minAmountOut, recipient, deadline) {
+        if (Date.now() > deadline) {
+            throw new DeadlineExpiredError(deadline, Date.now());
+        }
+        if (amountIn <= 0n) {
+            throw new ZeroAmountError("amountIn");
+        }
+        const rawPool = this.store.getPool(poolId);
+        if (!rawPool) {
+            throw new PoolNotFoundError(poolId);
+        }
+        // Atomic working copy - state will only commit if all invariants hold
+        const pool = JSON.parse(JSON.stringify(rawPool));
+        const isTokenAIn = tokenIn.toLowerCase() === pool.tokenA.toLowerCase();
+        const isTokenBIn = tokenIn.toLowerCase() === pool.tokenB.toLowerCase();
+        if (!isTokenAIn && !isTokenBIn) {
+            throw new AmmError("AMM_INVALID_TOKEN", `Token ${tokenIn} not present in pool ${poolId}`);
+        }
+        let reserveIn = BigInt(isTokenAIn ? pool.reserveA : pool.reserveB);
+        let reserveOut = BigInt(isTokenAIn ? pool.reserveB : pool.reserveA);
+        const feeMultiplier = BPS_DIVISOR - BigInt(pool.feeBps);
+        const amountInWithFee = amountIn * feeMultiplier;
+        const numerator = amountInWithFee * reserveOut;
+        const denominator = (reserveIn * BPS_DIVISOR) + amountInWithFee;
+        const amountOut = numerator / denominator;
+        if (amountOut <= 0n) {
+            throw new InsufficientLiquidityError("Trade output calculates to zero");
+        }
+        if (amountOut < minAmountOut) {
+            throw new ExcessiveSlippageError(minAmountOut.toString(), amountOut.toString());
+        }
+        const feeAmount = (amountIn * BigInt(pool.feeBps)) / BPS_DIVISOR;
+        const newReserveIn = reserveIn + amountIn;
+        const newReserveOut = reserveOut - amountOut;
+        // Strict K Invariant Verification (Must never decrease)
+        const kBefore = reserveIn * reserveOut;
+        const kAfter = newReserveIn * newReserveOut;
+        if (kAfter < kBefore) {
+            throw new InvariantViolationError(kBefore.toString(), kAfter.toString());
+        }
+        if (isTokenAIn) {
+            pool.reserveA = newReserveIn.toString();
+            pool.reserveB = newReserveOut.toString();
+        }
+        else {
+            pool.reserveB = newReserveIn.toString();
+            pool.reserveA = newReserveOut.toString();
+        }
+        pool.tradeCount += 1;
+        pool.lastUpdatedAt = Date.now();
+        // Commit state atomically
+        this.store.savePool(pool);
+        this.store.logAudit("SWAP", poolId, {
+            tokenIn,
+            amountIn: amountIn.toString(),
+            amountOut: amountOut.toString(),
+            feeAmount: feeAmount.toString(),
+            recipient
+        });
+        return { amountOut, feeAmount, pool };
+    }
+    addLiquidity(poolId, amountADesired, amountBDesired, amountAMin, amountBMin, provider, deadline) {
+        if (Date.now() > deadline) {
+            throw new DeadlineExpiredError(deadline, Date.now());
+        }
+        if (amountADesired <= 0n || amountBDesired <= 0n) {
+            throw new ZeroAmountError("amountDesired");
+        }
+        const rawPool = this.store.getPool(poolId);
+        if (!rawPool) {
+            throw new PoolNotFoundError(poolId);
+        }
+        const pool = JSON.parse(JSON.stringify(rawPool));
+        const rA = BigInt(pool.reserveA);
+        const rB = BigInt(pool.reserveB);
+        const totalLp = BigInt(pool.totalLpSupply);
+        // Compute optimal deposit enforcing pool ratio and refunding excess
+        let actualA;
+        let actualB;
+        let refundA = 0n;
+        let refundB = 0n;
+        const amountBOptimal = (amountADesired * rB) / rA;
+        if (amountBOptimal <= amountBDesired) {
+            if (amountBOptimal < amountBMin) {
+                throw new ExcessiveSlippageError(amountBMin.toString(), amountBOptimal.toString());
+            }
+            actualA = amountADesired;
+            actualB = amountBOptimal;
+            refundB = amountBDesired - amountBOptimal;
+        }
+        else {
+            const amountAOptimal = (amountBDesired * rA) / rB;
+            if (amountAOptimal < amountAMin) {
+                throw new ExcessiveSlippageError(amountAMin.toString(), amountAOptimal.toString());
+            }
+            actualA = amountAOptimal;
+            actualB = amountBDesired;
+            refundA = amountADesired - amountAOptimal;
+        }
+        const lpA = (actualA * totalLp) / rA;
+        const lpB = (actualB * totalLp) / rB;
+        const lpToMint = lpA < lpB ? lpA : lpB;
+        pool.reserveA = (rA + actualA).toString();
+        pool.reserveB = (rB + actualB).toString();
+        pool.totalLpSupply = (totalLp + lpToMint).toString();
+        const provKey = provider.toLowerCase();
+        const curBalance = BigInt(pool.lpBalances[provKey] || "0");
+        pool.lpBalances[provKey] = (curBalance + lpToMint).toString();
+        pool.lastUpdatedAt = Date.now();
+        this.store.savePool(pool);
+        this.store.logAudit("ADD_LIQUIDITY", poolId, {
+            provider,
+            actualA: actualA.toString(),
+            actualB: actualB.toString(),
+            refundA: refundA.toString(),
+            refundB: refundB.toString(),
+            lpTokensMinted: lpToMint.toString()
+        });
+        return { amountA: actualA, amountB: actualB, refundA, refundB, lpTokensMinted: lpToMint, pool };
+    }
+    removeLiquidity(poolId, lpTokensToBurn, amountAMin, amountBMin, provider, deadline) {
+        if (Date.now() > deadline) {
+            throw new DeadlineExpiredError(deadline, Date.now());
+        }
+        if (lpTokensToBurn <= 0n) {
+            throw new ZeroAmountError("lpTokensToBurn");
+        }
+        const rawPool = this.store.getPool(poolId);
+        if (!rawPool) {
+            throw new PoolNotFoundError(poolId);
+        }
+        const pool = JSON.parse(JSON.stringify(rawPool));
+        const provKey = provider.toLowerCase();
+        const userLp = BigInt(pool.lpBalances[provKey] || "0");
+        if (userLp < lpTokensToBurn) {
+            throw new AmmError("AMM_INSUFFICIENT_LP_BALANCE", `User LP balance (${userLp}) is less than burn amount (${lpTokensToBurn})`);
+        }
+        const rA = BigInt(pool.reserveA);
+        const rB = BigInt(pool.reserveB);
+        const totalLp = BigInt(pool.totalLpSupply);
+        if (lpTokensToBurn > totalLp - MINIMUM_LIQUIDITY) {
+            throw new InsufficientLiquidityError("Cannot redeem permanently locked minimum liquidity");
+        }
+        const amountA = (lpTokensToBurn * rA) / totalLp;
+        const amountB = (lpTokensToBurn * rB) / totalLp;
+        if (amountA < amountAMin) {
+            throw new ExcessiveSlippageError(amountAMin.toString(), amountA.toString());
+        }
+        if (amountB < amountBMin) {
+            throw new ExcessiveSlippageError(amountBMin.toString(), amountB.toString());
+        }
+        pool.reserveA = (rA - amountA).toString();
+        pool.reserveB = (rB - amountB).toString();
+        pool.totalLpSupply = (totalLp - lpTokensToBurn).toString();
+        pool.lpBalances[provKey] = (userLp - lpTokensToBurn).toString();
+        pool.lastUpdatedAt = Date.now();
+        this.store.savePool(pool);
+        this.store.logAudit("REMOVE_LIQUIDITY", poolId, {
+            provider,
+            lpTokensBurned: lpTokensToBurn.toString(),
+            amountA: amountA.toString(),
+            amountB: amountB.toString()
+        });
+        return { amountA, amountB, pool };
+    }
+}

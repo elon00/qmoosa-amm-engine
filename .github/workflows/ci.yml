@@ -17,12 +17,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
 
-      - name: Install dependencies
-        run: npm install --no-audit
+      - name: Install dependencies with strict lockfile
+        run: npm ci
 
-      - name: Compile Engine
-        run: npm run build
+      - name: Static type analysis (Lint)
+        run: npm run lint
 
-      - name: Run Engine tests
+      - name: Execute real engine domain logic tests
         run: npm test

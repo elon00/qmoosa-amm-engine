@@ -1,13 +1,14 @@
 {
   "name": "@qmoosa/amm-engine",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Core domain logic, transaction processing, state machine, and persistent store for Qmoosa AMM",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "node -e \"console.log('AMM Engine domain logic test passed.')\"",
-    "lint": "node -e \"console.log('Engine lint passed.')\""
+    "test": "npm run build && node --test tests/engine.test.mjs",
+    "lint": "tsc --noEmit"
   },
   "keywords": [
     "amm",

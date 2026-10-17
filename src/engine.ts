@@ -186,8 +186,19 @@ export class AmmEngine {
     if (Date.now() > deadline) {
       throw new DeadlineExpiredError(deadline, Date.now());
     }
+    // 1. Strict positive desired amounts
     if (amountADesired <= 0n || amountBDesired <= 0n) {
       throw new ZeroAmountError("amountDesired");
+    }
+    // 2. Strict non-negative and valid minimum thresholds
+    if (amountAMin < 0n || amountBMin < 0n) {
+      throw new ZeroAmountError("amountMin");
+    }
+    if (amountAMin > amountADesired) {
+      throw new ExcessiveSlippageError(amountADesired.toString(), amountAMin.toString());
+    }
+    if (amountBMin > amountBDesired) {
+      throw new ExcessiveSlippageError(amountBDesired.toString(), amountBMin.toString());
     }
 
     const rawPool = this.store.getPool(poolId);
@@ -201,6 +212,10 @@ export class AmmEngine {
     const rB = BigInt(pool.reserveB);
     const totalLp = BigInt(pool.totalLpSupply);
 
+    if (rA <= 0n || rB <= 0n || totalLp <= 0n) {
+      throw new InsufficientLiquidityError("Pool reserves or total LP supply exhausted");
+    }
+
     // Compute optimal deposit enforcing pool ratio and refunding excess
     let actualA: bigint;
     let actualB: bigint;
@@ -209,25 +224,39 @@ export class AmmEngine {
 
     const amountBOptimal = (amountADesired * rB) / rA;
     if (amountBOptimal <= amountBDesired) {
-      if (amountBOptimal < amountBMin) {
-        throw new ExcessiveSlippageError(amountBMin.toString(), amountBOptimal.toString());
-      }
       actualA = amountADesired;
       actualB = amountBOptimal;
       refundB = amountBDesired - amountBOptimal;
     } else {
       const amountAOptimal = (amountBDesired * rA) / rB;
-      if (amountAOptimal < amountAMin) {
-        throw new ExcessiveSlippageError(amountAMin.toString(), amountAOptimal.toString());
+      if (amountAOptimal > amountADesired) {
+        throw new AmmError("AMM_SUB_OPTIMAL_RATIO", "Inconsistent optimal deposit calculation");
       }
       actualA = amountAOptimal;
       actualB = amountBDesired;
       refundA = amountADesired - amountAOptimal;
     }
 
+    // Enforce both minimum bounds strictly on actual deposit amounts
+    if (actualA < amountAMin) {
+      throw new ExcessiveSlippageError(amountAMin.toString(), actualA.toString());
+    }
+    if (actualB < amountBMin) {
+      throw new ExcessiveSlippageError(amountBMin.toString(), actualB.toString());
+    }
+    // Enforce non-zero actual deposit amounts
+    if (actualA <= 0n || actualB <= 0n) {
+      throw new ZeroAmountError("actualDeposit");
+    }
+
     const lpA = (actualA * totalLp) / rA;
     const lpB = (actualB * totalLp) / rB;
     const lpToMint = lpA < lpB ? lpA : lpB;
+
+    // Enforce non-zero LP minting
+    if (lpToMint <= 0n) {
+      throw new InsufficientLiquidityError("Deposit yields 0 LP tokens minted due to extreme dilution or rounding");
+    }
 
     pool.reserveA = (rA + actualA).toString();
     pool.reserveB = (rB + actualB).toString();
@@ -265,6 +294,9 @@ export class AmmEngine {
     if (lpTokensToBurn <= 0n) {
       throw new ZeroAmountError("lpTokensToBurn");
     }
+    if (amountAMin < 0n || amountBMin < 0n) {
+      throw new ZeroAmountError("amountMin");
+    }
 
     const rawPool = this.store.getPool(poolId);
     if (!rawPool) {
@@ -289,6 +321,10 @@ export class AmmEngine {
 
     const amountA = (lpTokensToBurn * rA) / totalLp;
     const amountB = (lpTokensToBurn * rB) / totalLp;
+
+    if (amountA <= 0n && amountB <= 0n) {
+      throw new ZeroAmountError("redeemedAmounts");
+    }
 
     if (amountA < amountAMin) {
       throw new ExcessiveSlippageError(amountAMin.toString(), amountA.toString());

@@ -63,6 +63,65 @@ describe("AMM Engine Domain Logic & State Machine", () => {
     assert.equal(lpTokensMinted > 0n, true);
   });
 
+  test("Add liquidity validates deposit bounds and rejects invalid inputs", () => {
+    const engine = new AmmEngine();
+    const { poolId } = engine.createPool("ETH", "USDC", 10000n, 20000n, creator, 30);
+    const deadline = Date.now() + 60000;
+
+    // Minimum exceeds desired
+    assert.throws(
+      () => engine.addLiquidity(poolId, 1000n, 2000n, 1001n, 2000n, trader, deadline),
+      /AMM_EXCESSIVE_SLIPPAGE/
+    );
+    assert.throws(
+      () => engine.addLiquidity(poolId, 1000n, 2000n, 1000n, 2001n, trader, deadline),
+      /AMM_EXCESSIVE_SLIPPAGE/
+    );
+
+    // Negative amounts
+    assert.throws(
+      () => engine.addLiquidity(poolId, -100n, 2000n, 0n, 0n, trader, deadline),
+      /AMM_ZERO_AMOUNT/
+    );
+    assert.throws(
+      () => engine.addLiquidity(poolId, 1000n, 2000n, -1n, 0n, trader, deadline),
+      /AMM_ZERO_AMOUNT/
+    );
+
+    // Zero actual deposit due to ratio rounding
+    const freshEngine = new AmmEngine();
+    const { poolId: dilutedPoolId } = freshEngine.createPool("ETH", "USDC", 1000000000000n, 10000n, creator, 30);
+    assert.throws(
+      () => freshEngine.addLiquidity(dilutedPoolId, 1000n, 10n, 0n, 0n, trader, deadline),
+      /AMM_ZERO_AMOUNT/
+    );
+
+    // Insufficient liquidity when pool total LP supply is exhausted
+    const { poolId: microPoolId } = freshEngine.createPool("DAI", "USDC", 1001n, 1001n, creator, 30);
+    const pool = freshEngine.store.getPool(microPoolId);
+    pool.totalLpSupply = "0";
+    freshEngine.store.savePool(pool);
+    assert.throws(
+      () => freshEngine.addLiquidity(microPoolId, 500n, 500n, 0n, 0n, trader, deadline),
+      /AMM_INSUFFICIENT_LIQUIDITY/
+    );
+  });
+
+  test("State store rollback preserves state on failed atomic transaction", () => {
+    const engine = new AmmEngine();
+    const { poolId } = engine.createPool("ETH", "USDC", 10000n, 20000n, creator, 30);
+    const poolBefore = JSON.parse(JSON.stringify(engine.store.getPool(poolId)));
+
+    // Fail addLiquidity with expired deadline
+    assert.throws(
+      () => engine.addLiquidity(poolId, 1000n, 2000n, 0n, 0n, trader, Date.now() - 1000),
+      /AMM_DEADLINE_EXPIRED/
+    );
+
+    const poolAfter = engine.store.getPool(poolId);
+    assert.deepEqual(poolAfter, poolBefore, "State must not mutate on failed transaction");
+  });
+
   test("Remove liquidity redeems proportional assets and burns LP tokens", () => {
     const engine = new AmmEngine();
     const { poolId, lpTokensMinted } = engine.createPool("ETH", "USDC", 10000n, 20000n, creator, 30);
@@ -81,3 +140,4 @@ describe("AMM Engine Domain Logic & State Machine", () => {
     assert.equal(BigInt(pool.lpBalances[creator.toLowerCase()]), lpTokensMinted - halfLp);
   });
 });
+

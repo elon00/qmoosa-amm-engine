@@ -16,9 +16,31 @@ export class EngineStateStore {
   private pools: Map<string, SerializedPool> = new Map();
   private auditLogs: Array<{ action: string; poolId: string; details: any; timestamp: number }> = [];
 
-  public getPoolId(tokenA: string, tokenB: string, feeBps: number): string {
-    const [t0, t1] = tokenA.toLowerCase() < tokenB.toLowerCase() ? [tokenA, tokenB] : [tokenB, tokenA];
-    return `${t0}:${t1}:${feeBps}`;
+  /**
+   * Generates a deterministic, canonical pool identifier independent of input order and case.
+   * For EVM tokens, canonicalizes to lowercase and optionally prefixes chainId.
+   * For non-EVM tokens, preserves case-sensitive addresses while ordering lexicographically.
+   */
+  public getPoolId(
+    tokenA: string,
+    tokenB: string,
+    feeBps: number,
+    chainId: number = 1,
+    networkType: "evm" | "non-evm" = "evm"
+  ): string {
+    if (!tokenA || !tokenB || typeof tokenA !== "string" || typeof tokenB !== "string") {
+      throw new Error("INVALID_TOKEN_IDENTIFIER: Tokens must be non-empty strings");
+    }
+    const isEvm = networkType === "evm";
+    const canonA = isEvm ? tokenA.trim().toLowerCase() : tokenA.trim();
+    const canonB = isEvm ? tokenB.trim().toLowerCase() : tokenB.trim();
+
+    if (canonA === canonB) {
+      throw new Error("AMM_IDENTICAL_ADDRESSES: Cannot create or query pool with identical assets");
+    }
+
+    const [t0, t1] = canonA < canonB ? [canonA, canonB] : [canonB, canonA];
+    return isEvm && chainId !== 1 ? `eip155:${chainId}:${t0}:${t1}:${feeBps}` : `${t0}:${t1}:${feeBps}`;
   }
 
   public savePool(pool: SerializedPool): void {

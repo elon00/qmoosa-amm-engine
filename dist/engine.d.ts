@@ -3,7 +3,7 @@ export declare function sqrtBigInt(n: bigint): bigint;
 export declare class AmmEngine {
     store: EngineStateStore;
     constructor(store?: EngineStateStore);
-    createPool(tokenA: string, tokenB: string, initialAmountA: bigint, initialAmountB: bigint, creator: string, feeBps?: number): {
+    createPool(tokenA: string, tokenB: string, initialAmountA: bigint, initialAmountB: bigint, creator: string, feeBps?: number, chainId?: number, networkType?: "evm" | "non-evm"): {
         poolId: string;
         lpTokensMinted: bigint;
     };

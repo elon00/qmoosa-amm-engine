@@ -14,7 +14,12 @@ export interface SerializedPool {
 export declare class EngineStateStore {
     private pools;
     private auditLogs;
-    getPoolId(tokenA: string, tokenB: string, feeBps: number): string;
+    /**
+     * Generates a deterministic, canonical pool identifier independent of input order and case.
+     * For EVM tokens, canonicalizes to lowercase and optionally prefixes chainId.
+     * For non-EVM tokens, preserves case-sensitive addresses while ordering lexicographically.
+     */
+    getPoolId(tokenA: string, tokenB: string, feeBps: number, chainId?: number, networkType?: "evm" | "non-evm"): string;
     savePool(pool: SerializedPool): void;
     getPool(poolId: string): SerializedPool | undefined;
     hasPool(poolId: string): boolean;

@@ -139,5 +139,54 @@ describe("AMM Engine Domain Logic & State Machine", () => {
     const pool = engine.store.getPool(poolId);
     assert.equal(BigInt(pool.lpBalances[creator.toLowerCase()]), lpTokensMinted - halfLp);
   });
+
+  test("Canonical pool identity rejects duplicate logical pools across case, order, and formatting", () => {
+    const engine = new AmmEngine();
+
+    // 1. Initial pool creation
+    const { poolId } = engine.createPool("USDC", "ETH", 100000n, 50n, creator, 30);
+    assert.equal(poolId, "eth:usdc:30");
+
+    // 2. Reject duplicate creation with lowercase
+    assert.throws(
+      () => engine.createPool("usdc", "eth", 100000n, 50n, creator, 30),
+      /AMM_POOL_ALREADY_EXISTS/
+    );
+
+    // 3. Reject duplicate creation with mixed case and reversed order
+    assert.throws(
+      () => engine.createPool("eTh", "UsDc", 100000n, 50n, creator, 30),
+      /AMM_POOL_ALREADY_EXISTS/
+    );
+
+    // 4. Reject duplicate creation with reversed lowercase order
+    assert.throws(
+      () => engine.createPool("eth", "usdc", 100000n, 50n, creator, 30),
+      /AMM_POOL_ALREADY_EXISTS/
+    );
+
+    // 5. Reject identical assets (same token in both positions)
+    assert.throws(
+      () => engine.createPool("USDC", "usdc", 1000n, 1000n, creator, 30),
+      /AMM_IDENTICAL_ADDRESSES/
+    );
+    assert.throws(
+      () => engine.createPool("ETH", "ETH", 1000n, 1000n, creator, 30),
+      /AMM_IDENTICAL_ADDRESSES/
+    );
+
+    // 6. Real EVM hex address canonicalization
+    const usdcAddr = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    const wethAddr = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+
+    const { poolId: hexPoolId } = engine.createPool(usdcAddr, wethAddr, 1000000n, 500n, creator, 30);
+    assert.equal(hexPoolId.startsWith("0xa0b8"), true);
+
+    // Re-creating with lowercase addresses or inverted order must strictly fail
+    assert.throws(
+      () => engine.createPool(wethAddr.toLowerCase(), usdcAddr.toLowerCase(), 1000000n, 500n, creator, 30),
+      /AMM_POOL_ALREADY_EXISTS/
+    );
+  });
 });
 

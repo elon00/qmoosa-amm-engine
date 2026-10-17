@@ -22,11 +22,14 @@ export class AmmEngine {
     constructor(store) {
         this.store = store || new EngineStateStore();
     }
-    createPool(tokenA, tokenB, initialAmountA, initialAmountB, creator, feeBps = 30) {
+    createPool(tokenA, tokenB, initialAmountA, initialAmountB, creator, feeBps = 30, chainId = 1, networkType = "evm") {
         if (!tokenA || !tokenB || typeof tokenA !== "string" || typeof tokenB !== "string") {
             throw new AmmError("AMM_INVALID_TOKEN", "Tokens must be non-empty strings");
         }
-        if (tokenA.trim().toLowerCase() === tokenB.trim().toLowerCase()) {
+        const isEvm = networkType === "evm";
+        const canonA = isEvm ? tokenA.trim().toLowerCase() : tokenA.trim();
+        const canonB = isEvm ? tokenB.trim().toLowerCase() : tokenB.trim();
+        if (canonA === canonB) {
             throw new AmmError("AMM_IDENTICAL_ADDRESSES", "Cannot create pool with identical token identifiers");
         }
         if (!Number.isInteger(feeBps) || feeBps < MIN_FEE_BPS || feeBps > MAX_FEE_BPS) {
@@ -35,10 +38,10 @@ export class AmmEngine {
         if (initialAmountA <= 0n || initialAmountB <= 0n) {
             throw new ZeroAmountError("initialAmount");
         }
-        const isTokenAFirst = tokenA.toLowerCase() < tokenB.toLowerCase();
-        const [normTokenA, normTokenB] = isTokenAFirst ? [tokenA, tokenB] : [tokenB, tokenA];
+        const isTokenAFirst = canonA < canonB;
+        const [normTokenA, normTokenB] = isTokenAFirst ? [canonA, canonB] : [canonB, canonA];
         const [normReserveA, normReserveB] = isTokenAFirst ? [initialAmountA, initialAmountB] : [initialAmountB, initialAmountA];
-        const poolId = this.store.getPoolId(normTokenA, normTokenB, feeBps);
+        const poolId = this.store.getPoolId(normTokenA, normTokenB, feeBps, chainId, networkType);
         if (this.store.hasPool(poolId)) {
             throw new AmmError("AMM_POOL_ALREADY_EXISTS", `Pool ${poolId} already exists`);
         }
